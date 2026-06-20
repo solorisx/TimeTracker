@@ -103,6 +103,24 @@ async function connectFile() {
   }
 }
 
+// --- Open an existing data file ---
+async function openFile() {
+  try {
+    const [handle] = await window.showOpenFilePicker({
+      types: [{ description: "JSON", accept: { "application/json": [".json"] } }],
+      multiple: false,
+    });
+    fileHandle = handle;
+    await idbSet(IDB_HANDLE_KEY, handle);
+    await readFile();
+    renderAll();
+  } catch (err) {
+    if (err && err.name === "AbortError") return; // user cancelled
+    console.error(err);
+    alert("Could not open the data file: " + err.message);
+  }
+}
+
 // --- Reconnect to a previously stored handle on startup ---
 async function tryRestoreHandle() {
   if (!HAS_FS_ACCESS) return false;
@@ -348,7 +366,6 @@ function renderFileStatus() {
   if (fileHandle) {
     status.textContent = "Connected: " + fileHandle.name;
     status.classList.add("connected");
-    $("connectBtn").textContent = "Change file";
     $("reloadBtn").hidden = false;
   } else if (HAS_FS_ACCESS) {
     status.textContent = "Not connected — using temporary storage";
@@ -547,6 +564,7 @@ function escapeAttr(s) {
  * ------------------------------------------------------------------------ */
 function wireEvents() {
   // File controls
+  $("openBtn").addEventListener("click", openFile);
   $("connectBtn").addEventListener("click", connectFile);
   $("reloadBtn").addEventListener("click", async () => {
     await readFile();
@@ -663,6 +681,7 @@ async function init() {
 
   // Show the right persistence controls.
   if (!HAS_FS_ACCESS) {
+    $("openBtn").hidden = true;
     $("connectBtn").hidden = true;
     $("exportBtn").hidden = false;
     $("importBtn").hidden = false;
