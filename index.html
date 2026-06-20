@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Time Tracker</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="app-header">
+    <h1>⏱ Time Tracker</h1>
+    <div class="file-bar">
+      <span id="fileStatus" class="file-status">Not connected</span>
+      <button id="connectBtn" type="button">Connect data file</button>
+      <button id="reloadBtn" type="button" class="secondary" hidden>Reload from file</button>
+      <!-- Fallback (non-File-System-Access browsers) -->
+      <button id="exportBtn" type="button" class="secondary" hidden>Export JSON</button>
+      <button id="importBtn" type="button" class="secondary" hidden>Import JSON</button>
+      <input id="importInput" type="file" accept="application/json,.json" hidden />
+    </div>
+  </header>
+
+  <main>
+    <!-- Active timer -->
+    <section class="panel timer-panel">
+      <h2>Timer</h2>
+      <div class="timer-row">
+        <select id="timerProject" aria-label="Project for timer"></select>
+        <input id="timerNote" type="text" placeholder="What are you working on? (optional)" />
+        <button id="startStopBtn" type="button" class="primary">Start</button>
+      </div>
+      <div id="timerDisplay" class="timer-display">00:00:00</div>
+    </section>
+
+    <div class="grid">
+      <!-- Projects -->
+      <section class="panel">
+        <h2>Projects</h2>
+        <form id="projectForm" class="inline-form">
+          <input id="projectName" type="text" placeholder="New project name" required />
+          <input id="projectColor" type="color" value="#4f86f7" aria-label="Project color" />
+          <button type="submit" class="primary">Add</button>
+        </form>
+        <ul id="projectList" class="project-list"></ul>
+      </section>
+
+      <!-- Manual entry -->
+      <section class="panel">
+        <h2>Add time manually</h2>
+        <form id="manualForm" class="manual-form">
+          <label>Project
+            <select id="manualProject" required></select>
+          </label>
+          <label>Date
+            <input id="manualDate" type="date" required />
+          </label>
+          <label>Duration (hh:mm)
+            <input id="manualDuration" type="text" placeholder="01:30" pattern="\d{1,2}:[0-5]\d" required />
+          </label>
+          <label>Note
+            <input id="manualNote" type="text" placeholder="Optional" />
+          </label>
+          <button type="submit" class="primary">Add entry</button>
+        </form>
+      </section>
+    </div>
+
+    <!-- Summary -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Summary</h2>
+        <select id="summaryPeriod" aria-label="Summary period">
+          <option value="today">Today</option>
+          <option value="week">This week</option>
+          <option value="month">This month</option>
+          <option value="all" selected>All time</option>
+        </select>
+      </div>
+      <ul id="summaryList" class="summary-list"></ul>
+    </section>
+
+    <!-- Entries -->
+    <section class="panel">
+      <h2>Entries</h2>
+      <div id="entryList" class="entry-list"></div>
+    </section>
+  </main>
+
+  <!-- Edit entry modal -->
+  <dialog id="editDialog">
+    <form id="editForm" method="dialog">
+      <h3>Edit entry</h3>
+      <label>Project
+        <select id="editProject" required></select>
+      </label>
+      <label>Date
+        <input id="editDate" type="date" required />
+      </label>
+      <label>Duration (hh:mm)
+        <input id="editDuration" type="text" pattern="\d{1,2}:[0-5]\d" required />
+      </label>
+      <label>Note
+        <input id="editNote" type="text" />
+      </label>
+      <div class="dialog-actions">
+        <button type="button" id="editCancel" class="secondary">Cancel</button>
+        <button type="submit" class="primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>
