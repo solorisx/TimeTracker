@@ -16,6 +16,7 @@ const IDB_HANDLE_KEY = "dataFile";
 
 let state = emptyState();
 let fileHandle = null;     // FileSystemFileHandle when connected (FS Access mode)
+let pendingHandle = null;  // handle retrieved from IDB that still needs permission (mobile reload)
 let saveTimer = null;      // debounce handle for saving
 let tickTimer = null;      // setInterval for the live timer display
 
@@ -127,13 +128,35 @@ async function tryRestoreHandle() {
   try {
     const handle = await idbGet(IDB_HANDLE_KEY);
     if (!handle) return false;
-    if (!(await ensurePermission(handle))) return false;
-    fileHandle = handle;
-    await readFile();
-    return true;
+    // queryPermission never needs a user gesture; requestPermission does.
+    // On mobile, requestPermission during init will fail without a touch event,
+    // so only proceed automatically when permission is already granted.
+    const perm = await handle.queryPermission({ mode: "readwrite" });
+    if (perm === "granted") {
+      fileHandle = handle;
+      await readFile();
+      return true;
+    }
+    // Permission needs a user gesture — surface the reconnect button instead.
+    pendingHandle = handle;
+    return false;
   } catch (err) {
     console.warn("Could not restore previous file:", err);
     return false;
+  }
+}
+
+// --- Re-request permission via user gesture (tap on mobile) ---
+async function reconnectFile() {
+  if (!pendingHandle) return;
+  try {
+    if (!(await ensurePermission(pendingHandle))) return;
+    fileHandle = pendingHandle;
+    pendingHandle = null;
+    await readFile();
+    renderAll();
+  } catch (err) {
+    console.warn("Could not reconnect to file:", err);
   }
 }
 
@@ -367,10 +390,17 @@ function renderFileStatus() {
     status.textContent = "Connected: " + fileHandle.name;
     status.classList.add("connected");
     $("reloadBtn").hidden = false;
+    $("reconnectBtn").hidden = true;
+  } else if (pendingHandle) {
+    status.textContent = "Tap to reconnect: " + pendingHandle.name;
+    status.classList.remove("connected");
+    $("reloadBtn").hidden = true;
+    $("reconnectBtn").hidden = false;
   } else if (HAS_FS_ACCESS) {
     status.textContent = "Not connected — using temporary storage";
     status.classList.remove("connected");
     $("reloadBtn").hidden = true;
+    $("reconnectBtn").hidden = true;
   } else {
     status.textContent = "Browser storage (use Export to back up)";
     status.classList.remove("connected");
@@ -566,6 +596,7 @@ function wireEvents() {
   // File controls
   $("openBtn").addEventListener("click", openFile);
   $("connectBtn").addEventListener("click", connectFile);
+  $("reconnectBtn").addEventListener("click", reconnectFile);
   $("reloadBtn").addEventListener("click", async () => {
     await readFile();
     renderAll();
