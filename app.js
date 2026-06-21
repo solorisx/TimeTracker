@@ -20,7 +20,7 @@ let saveTimer = null;      // debounce handle for saving
 let tickTimer = null;      // setInterval for the live timer display
 
 function emptyState() {
-  return { version: 1, projects: [], entries: [], running: null };
+  return { version: 2, projects: [], entries: [], running: null };
 }
 
 /* ---------------------------------------------------------------------------
@@ -78,16 +78,12 @@ async function ensurePermission(handle, mode = "readwrite") {
 // --- Connect (create or open) a data file ---
 async function connectFile() {
   try {
-    let handle;
-    // Default to creating/picking a file named timetracker.json.
-    handle = await window.showSaveFilePicker({
+    const handle = await window.showSaveFilePicker({
       suggestedName: "timetracker.json",
       types: [{ description: "JSON", accept: { "application/json": [".json"] } }],
     });
     fileHandle = handle;
     await idbSet(IDB_HANDLE_KEY, handle);
-
-    // If the file already has content, load it; otherwise write current state.
     const file = await handle.getFile();
     const text = (await file.text()).trim();
     if (text) {
@@ -97,7 +93,7 @@ async function connectFile() {
     }
     renderAll();
   } catch (err) {
-    if (err && err.name === "AbortError") return; // user cancelled
+    if (err && err.name === "AbortError") return;
     console.error(err);
     alert("Could not connect the data file: " + err.message);
   }
@@ -115,7 +111,7 @@ async function openFile() {
     await readFile();
     renderAll();
   } catch (err) {
-    if (err && err.name === "AbortError") return; // user cancelled
+    if (err && err.name === "AbortError") return;
     console.error(err);
     alert("Could not open the data file: " + err.message);
   }
@@ -175,7 +171,12 @@ async function persist() {
 function normalize(data) {
   const s = emptyState();
   if (data && typeof data === "object") {
-    if (Array.isArray(data.projects)) s.projects = data.projects;
+    if (Array.isArray(data.projects)) {
+      s.projects = data.projects.map((p) => ({
+        ...p,
+        categories: Array.isArray(p.categories) ? p.categories : [],
+      }));
+    }
     if (Array.isArray(data.entries)) s.entries = data.entries;
     if (data.running && data.running.projectId) s.running = data.running;
   }
@@ -222,6 +223,7 @@ function addProject(name, color) {
     color,
     createdAt: new Date().toISOString(),
     archived: false,
+    categories: [],
   });
   commit();
 }
@@ -243,7 +245,23 @@ function deleteProject(id) {
   commit();
 }
 
-function addEntry({ projectId, start, end, durationSec, note }) {
+function addCategory(projectId, name) {
+  const p = projectById(projectId);
+  if (!p) return;
+  if (!Array.isArray(p.categories)) p.categories = [];
+  p.categories.push({ id: crypto.randomUUID(), name: name.trim() });
+  commit();
+}
+
+function deleteCategory(projectId, catId) {
+  const p = projectById(projectId);
+  if (!p || !Array.isArray(p.categories)) return;
+  // Entries that had this category automatically fall into "Other" (categoryId no longer matches)
+  p.categories = p.categories.filter((c) => c.id !== catId);
+  commit();
+}
+
+function addEntry({ projectId, start, end, durationSec, note, categoryId }) {
   state.entries.push({
     id: crypto.randomUUID(),
     projectId,
@@ -251,6 +269,7 @@ function addEntry({ projectId, start, end, durationSec, note }) {
     end: end || null,
     durationSec,
     note: (note || "").trim(),
+    categoryId: categoryId || null,
   });
   commit();
 }
@@ -313,12 +332,61 @@ function todayISODate() {
   return d.toISOString().slice(0, 10);
 }
 
+// Build <option> tags for a category select for the given project.
+// selectedCatId=null/"" → "Other" option is selected.
+function categoryOptionsHTML(projectId, selectedCatId) {
+  const p = projectById(projectId);
+  const cats = (p && p.categories) || [];
+  const noneSelected = !selectedCatId || !cats.find((c) => c.id === selectedCatId);
+  return (
+    `<option value=""${noneSelected ? " selected" : ""}>Other</option>` +
+    cats
+      .map(
+        (c) =>
+          `<option value="${c.id}"${c.id === selectedCatId ? " selected" : ""}>${escapeHTML(c.name)}</option>`
+      )
+      .join("")
+  );
+}
+
+// Refresh a category <select> for the given project.
+// Hides the element when the project has no custom categories.
+// If selectedCatId is omitted the current element value is preserved (falls back to "Other" if no longer valid).
+function refreshCategorySelect(selectId, projectId, selectedCatId) {
+  const sel = $(selectId);
+  if (!sel) return;
+  const p = projectById(projectId);
+  const cats = (p && p.categories) || [];
+  if (cats.length === 0) {
+    sel.hidden = true;
+    sel.innerHTML = `<option value="">Other</option>`;
+    return;
+  }
+  sel.hidden = false;
+  const prev = selectedCatId !== undefined ? selectedCatId : sel.value;
+  sel.innerHTML = categoryOptionsHTML(projectId, prev);
+}
+
+// Same as refreshCategorySelect but for a plain <label> wrapper — also hides the label.
+function refreshCategoryField(labelId, selectId, projectId, selectedCatId) {
+  const lbl = $(labelId);
+  const p = projectById(projectId);
+  const cats = (p && p.categories) || [];
+  if (lbl) lbl.hidden = cats.length === 0;
+  refreshCategorySelect(selectId, projectId, selectedCatId);
+}
+
 /* ---------------------------------------------------------------------------
  * 4. Timer
  * ------------------------------------------------------------------------ */
-function startTimer(projectId, note) {
+function startTimer(projectId, note, categoryId) {
   if (!projectId) { alert("Create and select a project first."); return; }
-  state.running = { projectId, start: new Date().toISOString(), note: (note || "").trim() };
+  state.running = {
+    projectId,
+    start: new Date().toISOString(),
+    note: (note || "").trim(),
+    categoryId: categoryId || null,
+  };
   commit();
   startTick();
 }
@@ -328,10 +396,9 @@ function stopTimer() {
   const start = new Date(state.running.start);
   const end = new Date();
   const durationSec = Math.max(1, Math.round((end - start) / 1000));
-  const { projectId, note } = state.running;
+  const { projectId, note, categoryId } = state.running;
   state.running = null;
-  // addEntry calls commit(); render clears the running display.
-  addEntry({ projectId, start: start.toISOString(), end: end.toISOString(), durationSec, note });
+  addEntry({ projectId, start: start.toISOString(), end: end.toISOString(), durationSec, note, categoryId });
   stopTick();
   renderTimer();
 }
@@ -358,6 +425,7 @@ function renderAll() {
   renderProjects();
   renderTimer();
   renderSummary();
+  renderCategoryStats();
   renderEntries();
 }
 
@@ -380,12 +448,16 @@ function renderFileStatus() {
 function projectOptionsHTML(selectedId) {
   return state.projects
     .filter((p) => !p.archived)
-    .map((p) => `<option value="${p.id}"${p.id === selectedId ? " selected" : ""}>${escapeHTML(p.name)}</option>`)
+    .map(
+      (p) =>
+        `<option value="${p.id}"${p.id === selectedId ? " selected" : ""}>${escapeHTML(p.name)}</option>`
+    )
     .join("");
 }
 
 function renderProjectSelects() {
   const active = state.projects.filter((p) => !p.archived);
+
   for (const id of ["timerProject", "manualProject"]) {
     const sel = $(id);
     const prev = sel.value;
@@ -393,6 +465,25 @@ function renderProjectSelects() {
       ? projectOptionsHTML(prev)
       : `<option value="">No projects yet</option>`;
     if (active.some((p) => p.id === prev)) sel.value = prev;
+  }
+
+  // Category selects follow the selected project (preserve selection if still valid)
+  refreshCategorySelect("timerCategory", $("timerProject").value);
+  refreshCategoryField("manualCategoryLabel", "manualCategory", $("manualProject").value);
+
+  // Category stats project dropdown
+  const catSel = $("catStatsProject");
+  if (catSel) {
+    const prev = catSel.value;
+    catSel.innerHTML =
+      `<option value="">Select a project…</option>` +
+      active
+        .map(
+          (p) =>
+            `<option value="${p.id}"${p.id === prev ? " selected" : ""}>${escapeHTML(p.name)}</option>`
+        )
+        .join("");
+    if (active.some((p) => p.id === prev)) catSel.value = prev;
   }
 }
 
@@ -406,10 +497,12 @@ function renderProjects() {
   ul.innerHTML = state.projects
     .map((p) => {
       const total = secToHM(totals[p.id] || 0);
+      const catCount = (p.categories || []).length;
       return `<li class="${p.archived ? "archived" : ""}">
         <span class="color-dot" style="background:${escapeAttr(p.color)}"></span>
         <span class="project-name">${escapeHTML(p.name)}</span>
         <span class="project-total">${total}</span>
+        <button type="button" class="secondary" data-cats="${p.id}">Categories${catCount ? ` (${catCount})` : ""}</button>
         <button type="button" class="secondary" data-archive="${p.id}">${p.archived ? "Unarchive" : "Archive"}</button>
         <button type="button" class="danger" data-del-project="${p.id}">Delete</button>
       </li>`;
@@ -428,6 +521,15 @@ function renderTimer() {
     $("timerProject").disabled = true;
     $("timerNote").value = running.note || "";
     $("timerNote").disabled = true;
+    // Show the locked-in category for the running session
+    const p = projectById(running.projectId);
+    if (p && (p.categories || []).length > 0) {
+      $("timerCategory").hidden = false;
+      $("timerCategory").innerHTML = categoryOptionsHTML(running.projectId, running.categoryId);
+    } else {
+      $("timerCategory").hidden = true;
+    }
+    $("timerCategory").disabled = true;
     $("timerDisplay").classList.add("running");
     if (!tickTimer) startTick();
   } else {
@@ -436,6 +538,8 @@ function renderTimer() {
     btn.classList.remove("danger");
     $("timerProject").disabled = false;
     $("timerNote").disabled = false;
+    $("timerCategory").disabled = false;
+    refreshCategorySelect("timerCategory", $("timerProject").value);
     $("timerDisplay").classList.remove("running");
     renderTimerDisplay();
   }
@@ -505,6 +609,77 @@ function renderSummary() {
        <span class="summary-total"><strong>${secToHM(grand)}</strong></span></li>`;
 }
 
+function renderCategoryStats() {
+  const projectId = $("catStatsProject").value;
+  const period = $("catStatsPeriod").value;
+  const ul = $("categoryStatsList");
+
+  if (!projectId) {
+    ul.innerHTML = `<li class="empty">Select a project to see its category breakdown.</li>`;
+    return;
+  }
+
+  const p = projectById(projectId);
+  if (!p) { ul.innerHTML = ""; return; }
+
+  const cats = p.categories || [];
+  const filterFn = periodFilter(period);
+  const entries = state.entries.filter(
+    (e) => e.projectId === projectId && (!filterFn || filterFn(e))
+  );
+
+  if (!entries.length) {
+    ul.innerHTML = `<li class="empty">No time tracked for this project in this period.</li>`;
+    return;
+  }
+
+  const totals = {};
+  let otherSec = 0;
+  for (const e of entries) {
+    const cat = cats.find((c) => c.id === e.categoryId);
+    if (cat) {
+      totals[cat.id] = (totals[cat.id] || 0) + (e.durationSec || 0);
+    } else {
+      otherSec += e.durationSec || 0;
+    }
+  }
+
+  const grand = entries.reduce((s, e) => s + (e.durationSec || 0), 0);
+
+  const rows = cats
+    .map((c) => ({ name: c.name, sec: totals[c.id] || 0 }))
+    .filter((r) => r.sec > 0)
+    .sort((a, b) => b.sec - a.sec);
+
+  if (otherSec > 0) rows.push({ name: "Other", sec: otherSec });
+
+  if (!rows.length) {
+    ul.innerHTML = `<li class="empty">No time tracked for this project in this period.</li>`;
+    return;
+  }
+
+  ul.innerHTML =
+    rows
+      .map((r) => {
+        const pct = grand > 0 ? Math.round((r.sec / grand) * 100) : 0;
+        return `<li class="cat-stat-row">
+          <span class="cat-stat-name">${escapeHTML(r.name)}</span>
+          <div class="cat-stat-bar-wrap">
+            <div class="cat-stat-bar" style="width:${pct}%"></div>
+          </div>
+          <span class="cat-stat-pct">${pct}%</span>
+          <span class="summary-total">${secToHM(r.sec)}</span>
+        </li>`;
+      })
+      .join("") +
+    `<li class="cat-stat-row">
+      <span class="cat-stat-name"><strong>Total</strong></span>
+      <div class="cat-stat-bar-wrap"></div>
+      <span class="cat-stat-pct"></span>
+      <span class="summary-total"><strong>${secToHM(grand)}</strong></span>
+    </li>`;
+}
+
 function renderEntries() {
   const container = $("entryList");
   const entries = [...state.entries].sort((a, b) => {
@@ -520,7 +695,11 @@ function renderEntries() {
   const groups = new Map();
   for (const e of entries) {
     const d = entryDate(e);
-    const key = d ? new Date(d).toLocaleDateString(undefined, { weekday: "short", year: "numeric", month: "short", day: "numeric" }) : "Undated";
+    const key = d
+      ? new Date(d).toLocaleDateString(undefined, {
+          weekday: "short", year: "numeric", month: "short", day: "numeric",
+        })
+      : "Undated";
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(e);
   }
@@ -533,10 +712,16 @@ function renderEntries() {
         const p = projectById(e.projectId);
         const dot = p ? p.color : "#ccc";
         const name = p ? p.name : "(deleted project)";
+        const cat = p && e.categoryId
+          ? (p.categories || []).find((c) => c.id === e.categoryId)
+          : null;
         return `<div class="entry-row">
           <span class="color-dot" style="background:${escapeAttr(dot)}"></span>
           <div class="entry-main">
-            <div class="entry-project">${escapeHTML(name)}</div>
+            <div class="entry-project">
+              ${escapeHTML(name)}
+              ${cat ? `<span class="entry-cat-badge">${escapeHTML(cat.name)}</span>` : ""}
+            </div>
             ${e.note ? `<div class="entry-note">${escapeHTML(e.note)}</div>` : ""}
           </div>
           <span class="entry-duration">${secToHM(e.durationSec || 0)}</span>
@@ -577,10 +762,13 @@ function wireEvents() {
     e.target.value = "";
   });
 
-  // Timer
+  // Timer: refresh category when project changes
+  $("timerProject").addEventListener("change", () => {
+    refreshCategorySelect("timerCategory", $("timerProject").value);
+  });
   $("startStopBtn").addEventListener("click", () => {
     if (state.running) stopTimer();
-    else startTimer($("timerProject").value, $("timerNote").value);
+    else startTimer($("timerProject").value, $("timerNote").value, $("timerCategory").value || null);
   });
 
   // Add project
@@ -594,9 +782,12 @@ function wireEvents() {
 
   // Project list actions (delegated)
   $("projectList").addEventListener("click", (e) => {
+    const catsId = e.target.dataset.cats;
     const archiveId = e.target.dataset.archive;
     const delId = e.target.dataset.delProject;
-    if (archiveId) {
+    if (catsId) {
+      openCategoriesDialog(catsId);
+    } else if (archiveId) {
       const p = projectById(archiveId);
       setProjectArchived(archiveId, !(p && p.archived));
     } else if (delId) {
@@ -604,7 +795,10 @@ function wireEvents() {
     }
   });
 
-  // Manual entry
+  // Manual entry: refresh category when project changes
+  $("manualProject").addEventListener("change", () => {
+    refreshCategoryField("manualCategoryLabel", "manualCategory", $("manualProject").value);
+  });
   $("manualDate").value = todayISODate();
   $("manualForm").addEventListener("submit", (e) => {
     e.preventDefault();
@@ -613,15 +807,25 @@ function wireEvents() {
     const sec = parseHM($("manualDuration").value);
     if (sec === null || sec === 0) { alert("Enter a duration as hh:mm, e.g. 01:30."); return; }
     const date = $("manualDate").value;
-    // Anchor manual entries at noon local time on the chosen date.
     const start = new Date(date + "T12:00:00").toISOString();
-    addEntry({ projectId, start, end: null, durationSec: sec, note: $("manualNote").value });
+    addEntry({
+      projectId,
+      start,
+      end: null,
+      durationSec: sec,
+      note: $("manualNote").value,
+      categoryId: $("manualCategory").value || null,
+    });
     $("manualDuration").value = "";
     $("manualNote").value = "";
   });
 
   // Summary period
   $("summaryPeriod").addEventListener("change", renderSummary);
+
+  // Category stats controls
+  $("catStatsProject").addEventListener("change", renderCategoryStats);
+  $("catStatsPeriod").addEventListener("change", renderCategoryStats);
 
   // Entry list actions (delegated)
   $("entryList").addEventListener("click", (e) => {
@@ -631,12 +835,33 @@ function wireEvents() {
     else if (delId) deleteEntry(delId);
   });
 
-  // Edit dialog
+  // Edit dialog: refresh category when project changes
+  $("editProject").addEventListener("change", () => {
+    refreshCategoryField("editCategoryLabel", "editCategory", $("editProject").value, null);
+  });
   $("editCancel").addEventListener("click", () => $("editDialog").close());
   $("editForm").addEventListener("submit", (e) => {
     e.preventDefault();
     saveEditDialog();
   });
+
+  // Categories dialog
+  $("addCatForm").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const name = $("newCatName").value.trim();
+    if (!name) return;
+    addCategory(catDialogProjectId, name);
+    $("newCatName").value = "";
+    renderCatDialogList();
+  });
+  $("catDialogList").addEventListener("click", (e) => {
+    const catId = e.target.dataset.delCat;
+    if (catId) {
+      deleteCategory(catDialogProjectId, catId);
+      renderCatDialogList();
+    }
+  });
+  $("closeCatDialogBtn").addEventListener("click", () => $("categoriesDialog").close());
 }
 
 /* ---------------------------------------------------------------------------
@@ -650,6 +875,7 @@ function openEditDialog(id) {
   editingId = id;
   $("editProject").innerHTML = projectOptionsHTML(e.projectId);
   $("editProject").value = e.projectId;
+  refreshCategoryField("editCategoryLabel", "editCategory", e.projectId, e.categoryId);
   const d = entryDate(e);
   $("editDate").value = d ? new Date(d).toISOString().slice(0, 10) : todayISODate();
   $("editDuration").value = secToHMInput(e.durationSec || 0);
@@ -667,10 +893,45 @@ function saveEditDialog() {
     projectId: $("editProject").value,
     durationSec: sec,
     note: $("editNote").value.trim(),
+    categoryId: $("editCategory").value || null,
     start: new Date(date + "T12:00:00").toISOString(),
     end: null,
   });
   $("editDialog").close();
+}
+
+/* ---------------------------------------------------------------------------
+ * 6c. Categories dialog
+ * ------------------------------------------------------------------------ */
+let catDialogProjectId = null;
+
+function openCategoriesDialog(projectId) {
+  const p = projectById(projectId);
+  if (!p) return;
+  catDialogProjectId = projectId;
+  $("catDialogProjectName").textContent = p.name;
+  $("newCatName").value = "";
+  renderCatDialogList();
+  $("categoriesDialog").showModal();
+}
+
+function renderCatDialogList() {
+  const p = projectById(catDialogProjectId);
+  if (!p) return;
+  const ul = $("catDialogList");
+  const cats = p.categories || [];
+  if (!cats.length) {
+    ul.innerHTML = `<li class="empty">No categories yet. Add one above.</li>`;
+    return;
+  }
+  ul.innerHTML = cats
+    .map(
+      (c) => `<li>
+        <span class="project-name">${escapeHTML(c.name)}</span>
+        <button type="button" class="danger" data-del-cat="${c.id}">Delete</button>
+      </li>`
+    )
+    .join("");
 }
 
 /* ---------------------------------------------------------------------------

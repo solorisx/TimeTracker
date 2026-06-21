@@ -27,6 +27,7 @@
       <h2>Timer</h2>
       <div class="timer-row">
         <select id="timerProject" aria-label="Project for timer"></select>
+        <select id="timerCategory" aria-label="Category" hidden></select>
         <input id="timerNote" type="text" placeholder="What are you working on? (optional)" />
         <button id="startStopBtn" type="button" class="primary">Start</button>
       </div>
@@ -51,6 +52,9 @@
         <form id="manualForm" class="manual-form">
           <label>Project
             <select id="manualProject" required></select>
+          </label>
+          <label id="manualCategoryLabel">Category
+            <select id="manualCategory"></select>
           </label>
           <label>Date
             <input id="manualDate" type="date" required />
@@ -80,6 +84,23 @@
       <ul id="summaryList" class="summary-list"></ul>
     </section>
 
+    <!-- Category Stats -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Category Stats</h2>
+        <div class="panel-head-controls">
+          <select id="catStatsProject" aria-label="Project for category stats"></select>
+          <select id="catStatsPeriod" aria-label="Category stats period">
+            <option value="today">Today</option>
+            <option value="week">This week</option>
+            <option value="month">This month</option>
+            <option value="all" selected>All time</option>
+          </select>
+        </div>
+      </div>
+      <ul id="categoryStatsList" class="category-stats-list"></ul>
+    </section>
+
     <!-- Entries -->
     <section class="panel">
       <h2>Entries</h2>
@@ -93,6 +114,9 @@
       <h3>Edit entry</h3>
       <label>Project
         <select id="editProject" required></select>
+      </label>
+      <label id="editCategoryLabel">Category
+        <select id="editCategory"></select>
       </label>
       <label>Date
         <input id="editDate" type="date" required />
@@ -108,6 +132,19 @@
         <button type="submit" class="primary">Save</button>
       </div>
     </form>
+  </dialog>
+
+  <!-- Manage categories modal -->
+  <dialog id="categoriesDialog">
+    <h3>Categories: <span id="catDialogProjectName"></span></h3>
+    <form id="addCatForm" class="inline-form">
+      <input id="newCatName" type="text" placeholder="New category name" required />
+      <button type="submit" class="primary">Add</button>
+    </form>
+    <ul id="catDialogList" class="project-list"></ul>
+    <div class="dialog-actions">
+      <button type="button" id="closeCatDialogBtn" class="secondary">Close</button>
+    </div>
   </dialog>
 
   <script src="app.js"></script>

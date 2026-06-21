@@ -63,6 +63,7 @@ main {
 .panel h2 { margin: 0 0 14px; font-size: 1.05rem; }
 .panel-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .panel-head h2 { margin: 0; }
+.panel-head-controls { display: flex; gap: 8px; align-items: center; }
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
 
 /* Timer */
@@ -121,6 +122,21 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .project-total, .summary-total { font-variant-numeric: tabular-nums; color: var(--muted); font-weight: 600; }
 .archived .project-name { text-decoration: line-through; color: var(--muted); }
 
+/* Category stats */
+.category-stats-list { list-style: none; margin: 0; padding: 0; }
+.cat-stat-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+.cat-stat-row:last-child { border-bottom: none; }
+.cat-stat-name { flex: 0 0 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cat-stat-bar-wrap { flex: 1; height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; min-width: 40px; }
+.cat-stat-bar { height: 100%; background: var(--primary); border-radius: 4px; transition: width 0.3s ease; }
+.cat-stat-pct { flex: 0 0 38px; text-align: right; color: var(--muted); font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+
 /* Entry list */
 .entry-list { display: flex; flex-direction: column; gap: 16px; }
 .entry-day-label { font-size: 0.8rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
@@ -138,6 +154,20 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .entry-duration { font-variant-numeric: tabular-nums; font-weight: 600; }
 .entry-actions { display: flex; gap: 4px; }
 .entry-actions button { padding: 4px 8px; font-size: 0.85rem; }
+
+/* Category badge shown inline in entry rows */
+.entry-cat-badge {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 500;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  margin-left: 6px;
+  vertical-align: middle;
+}
 
 .empty { color: var(--muted); font-style: italic; padding: 8px 0; }
 
@@ -158,4 +188,5 @@ dialog h3 { margin: 0 0 16px; }
 @media (max-width: 680px) {
   .grid { grid-template-columns: 1fr; }
   main { padding: 16px; }
+  .cat-stat-name { flex: 0 0 90px; }
 }
