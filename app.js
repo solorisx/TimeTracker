@@ -268,12 +268,29 @@ async function driveFetch(url, opts = {}, retried = false) {
   return res;
 }
 
+// Build a descriptive Error from a failed Drive response, including Google's
+// own message (e.g. "Google Drive API has not been used in project N …") and
+// the activation URL it returns, so the cause is actionable.
+async function driveError(res, label) {
+  let detail = "";
+  try {
+    const body = await res.json();
+    if (body && body.error) {
+      detail = body.error.message || "";
+      const help = body.error.errors && body.error.errors[0] && body.error.errors[0].extendedHelp;
+      if (help) detail += "\n" + help;
+    }
+  } catch { /* non-JSON body */ }
+  console.error("[TT]", label, res.status, detail);
+  return new Error(`${label} (${res.status})` + (detail ? ": " + detail : ""));
+}
+
 async function driveFindFile() {
   const q = encodeURIComponent(`name='${DRIVE_FILE_NAME}' and trashed=false`);
   const res = await driveFetch(
     `https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id,name)`
   );
-  if (!res.ok) throw new Error("Drive search failed: " + res.status);
+  if (!res.ok) throw await driveError(res, "Drive search failed");
   const data = await res.json();
   return data.files && data.files.length ? data.files[0].id : null;
 }
@@ -289,7 +306,7 @@ async function driveCreateFile() {
     "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id",
     { method: "POST", headers: { "Content-Type": `multipart/related; boundary=${boundary}` }, body }
   );
-  if (!res.ok) throw new Error("Drive create failed: " + res.status);
+  if (!res.ok) throw await driveError(res, "Drive create failed");
   const data = await res.json();
   return data.id;
 }
@@ -298,7 +315,7 @@ async function driveRead() {
   if (!driveFileId) return;
   console.log("[TT] driveRead:", driveFileId);
   const res = await driveFetch(`https://www.googleapis.com/drive/v3/files/${driveFileId}?alt=media`);
-  if (!res.ok) throw new Error("Drive read failed: " + res.status);
+  if (!res.ok) throw await driveError(res, "Drive read failed");
   const text = (await res.text()).trim();
   console.log("[TT] driveRead: text length", text.length);
   state = text ? normalize(JSON.parse(text)) : emptyState();
@@ -311,7 +328,7 @@ async function driveWrite() {
     `https://www.googleapis.com/upload/drive/v3/files/${driveFileId}?uploadType=media`,
     { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(state, null, 2) }
   );
-  if (!res.ok) throw new Error("Drive write failed: " + res.status);
+  if (!res.ok) throw await driveError(res, "Drive write failed");
 }
 
 // Connect to Drive from a user gesture (button click): authorize, then
