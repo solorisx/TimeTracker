@@ -29,12 +29,45 @@ a cloud-synced folder, so you can use it from any computer.
 > After that it reconnects automatically when you reopen the page (one permission click may be
 > required after a browser restart).
 
+## Google Drive sync (recommended for mobile + GitHub Pages)
+
+The local-file mode above relies on the browser's File System Access API, which **does not work
+on mobile browsers** and **hangs on some Linux setups** when the file lives on a Google Drive /
+network mount. For phones, tablets, or when hosting the app on GitHub Pages, use **native Google
+Drive sync** instead: the app stores a single `timetracker.json` in your Drive and talks to the
+Drive API directly — no local file, works identically on desktop and mobile, and reconnects
+automatically after a reload.
+
+It needs a one-time, free Google Cloud setup to get an **OAuth Client ID** (this ID is not a
+secret — it ships in the page):
+
+1. Go to <https://console.cloud.google.com/> and create a project (any name).
+2. **APIs & Services → Library →** enable the **Google Drive API**.
+3. **APIs & Services → OAuth consent screen:** choose **External**, fill in the app name and your
+   email. Under **Audience**, add your own Google account as a **Test user** (no Google
+   verification is needed — the `drive.file` scope only lets the app touch the one file it
+   creates).
+4. **APIs & Services → Credentials → Create credentials → OAuth client ID → Web application.**
+   Under **Authorized JavaScript origins** add the exact origin(s) you'll open the app from:
+   - `https://<your-username>.github.io` for GitHub Pages (the path after the host doesn't matter)
+   - `http://localhost:8000` (or whatever port) for local testing
+5. Copy the generated **Client ID** and paste it into [`config.js`](config.js):
+   ```js
+   window.TT_CONFIG = { googleClientId: "1234567890-abc123.apps.googleusercontent.com" };
+   ```
+6. Reload the app and click **Connect Google Drive**, then sign in. After that it reconnects
+   silently on every reload (on mobile too). On a fresh device, click the button once to authorize.
+
+> Hosting on GitHub Pages? Just commit your `config.js` with the Client ID and push — since the
+> Client ID isn't secret and the origin is locked down to your Pages domain, this is safe.
+
 ## Browser support
 
 | Browser            | Storage mode                                              |
 | ------------------ | -------------------------------------------------------- |
-| Edge / Chrome      | Full file sync via the File System Access API (recommended) |
-| Firefox / Safari   | Falls back to in-browser storage + **Export / Import JSON** buttons |
+| Any browser        | **Google Drive sync** once a Client ID is configured (best for mobile) |
+| Edge / Chrome      | Local file sync via the File System Access API (desktop only) |
+| Firefox / Safari   | In-browser storage + **Export / Import JSON** buttons |
 
 In the fallback mode, data lives in that browser only. Use **Export JSON** to save a backup to
 your cloud folder and **Import JSON** to load it on another machine.

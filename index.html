@@ -11,6 +11,7 @@
     <h1>⏱ Time Tracker</h1>
     <div class="file-bar">
       <span id="fileStatus" class="file-status">Not connected</span>
+      <button id="driveBtn" type="button" class="primary" hidden>Connect Google Drive</button>
       <button id="reconnectBtn" type="button" class="primary" hidden>Reconnect to file</button>
       <button id="openBtn" type="button" class="primary">Open data file</button>
       <button id="connectBtn" type="button" class="secondary">New data file</button>
@@ -112,6 +113,9 @@
     </form>
   </dialog>
 
+  <!-- Google Identity Services (for optional Google Drive sync) -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script src="config.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

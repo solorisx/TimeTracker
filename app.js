@@ -14,12 +14,25 @@ const IDB_NAME = "timetracker";
 const IDB_STORE = "handles";
 const IDB_HANDLE_KEY = "dataFile";
 
+// --- Google Drive config (see config.js + README "Google Drive setup") ---
+const GOOGLE_CLIENT_ID = (window.TT_CONFIG && window.TT_CONFIG.googleClientId) || "";
+const DRIVE_ENABLED = !!GOOGLE_CLIENT_ID;
+const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file";
+const DRIVE_FILE_NAME = "timetracker.json";
+const LS_DRIVE_FILE_ID = "timetracker.driveFileId";
+
 let state = emptyState();
 let fileHandle = null;     // FileSystemFileHandle when connected (FS Access mode)
 let pendingHandle = null;  // handle retrieved from IDB that still needs permission (mobile reload)
 let openedFileName = null; // name of file opened via <input type="file"> (no write handle)
 let saveTimer = null;      // debounce handle for saving
 let tickTimer = null;      // setInterval for the live timer display
+
+// Google Drive runtime state
+let tokenClient = null;    // GIS token client
+let driveToken = null;     // current OAuth access token
+let driveFileId = null;    // Drive file id when connected
+let driveNeedsAuth = false; // true when a stored file exists but silent auth failed
 
 function emptyState() {
   return { version: 1, projects: [], entries: [], running: null };
@@ -213,7 +226,151 @@ async function writeFile() {
   await writable.close();
 }
 
-// --- Persist: debounced; routes to file or localStorage ---
+/* ---------------------------------------------------------------------------
+ * 1b. Google Drive storage (works on desktop + mobile, survives reload)
+ * ------------------------------------------------------------------------ */
+
+// Resolve once the Google Identity Services script has loaded.
+function whenGisReady(timeoutMs = 8000) {
+  return new Promise((resolve, reject) => {
+    const start = Date.now();
+    (function check() {
+      if (window.google && google.accounts && google.accounts.oauth2) return resolve();
+      if (Date.now() - start > timeoutMs) return reject(new Error("Google sign-in library failed to load"));
+      setTimeout(check, 100);
+    })();
+  });
+}
+
+// Request an access token. prompt: undefined => GIS decides; "" => silent (no UI).
+// Resolution is routed through tokenWaiters because GIS captures the success
+// and error callbacks at initTokenClient() time (see ensureTokenClient).
+let tokenWaiters = null;
+function requestToken(prompt) {
+  return new Promise((resolve, reject) => {
+    if (!tokenClient) return reject(new Error("Drive not configured"));
+    tokenWaiters = { resolve, reject };
+    tokenClient.requestAccessToken(prompt === undefined ? {} : { prompt });
+  });
+}
+
+// fetch wrapper that attaches the token and refreshes once on 401.
+async function driveFetch(url, opts = {}, retried = false) {
+  const res = await fetch(url, {
+    ...opts,
+    headers: { ...(opts.headers || {}), Authorization: "Bearer " + driveToken },
+  });
+  if (res.status === 401 && !retried) {
+    console.log("[TT] driveFetch: 401, refreshing token");
+    await requestToken("");
+    return driveFetch(url, opts, true);
+  }
+  return res;
+}
+
+async function driveFindFile() {
+  const q = encodeURIComponent(`name='${DRIVE_FILE_NAME}' and trashed=false`);
+  const res = await driveFetch(
+    `https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id,name)`
+  );
+  if (!res.ok) throw new Error("Drive search failed: " + res.status);
+  const data = await res.json();
+  return data.files && data.files.length ? data.files[0].id : null;
+}
+
+async function driveCreateFile() {
+  const boundary = "ttb" + Math.random().toString(16).slice(2);
+  const meta = { name: DRIVE_FILE_NAME, mimeType: "application/json" };
+  const body =
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n` +
+    `--${boundary}\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(state, null, 2)}\r\n` +
+    `--${boundary}--`;
+  const res = await driveFetch(
+    "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id",
+    { method: "POST", headers: { "Content-Type": `multipart/related; boundary=${boundary}` }, body }
+  );
+  if (!res.ok) throw new Error("Drive create failed: " + res.status);
+  const data = await res.json();
+  return data.id;
+}
+
+async function driveRead() {
+  if (!driveFileId) return;
+  console.log("[TT] driveRead:", driveFileId);
+  const res = await driveFetch(`https://www.googleapis.com/drive/v3/files/${driveFileId}?alt=media`);
+  if (!res.ok) throw new Error("Drive read failed: " + res.status);
+  const text = (await res.text()).trim();
+  console.log("[TT] driveRead: text length", text.length);
+  state = text ? normalize(JSON.parse(text)) : emptyState();
+}
+
+async function driveWrite() {
+  if (!driveFileId) return;
+  console.log("[TT] driveWrite:", driveFileId);
+  const res = await driveFetch(
+    `https://www.googleapis.com/upload/drive/v3/files/${driveFileId}?uploadType=media`,
+    { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(state, null, 2) }
+  );
+  if (!res.ok) throw new Error("Drive write failed: " + res.status);
+}
+
+// Connect to Drive from a user gesture (button click): authorize, then
+// find-or-create the data file and load it.
+async function connectDrive() {
+  try {
+    await ensureTokenClient();
+    console.log("[TT] connectDrive: requesting token");
+    await requestToken();
+    let id = localStorage.getItem(LS_DRIVE_FILE_ID);
+    if (id) {
+      const check = await driveFetch(`https://www.googleapis.com/drive/v3/files/${id}?fields=id`);
+      if (!check.ok) { console.log("[TT] connectDrive: stored id invalid, re-searching"); id = null; }
+    }
+    if (!id) id = await driveFindFile();
+    if (!id) { console.log("[TT] connectDrive: creating new file"); id = await driveCreateFile(); }
+    driveFileId = id;
+    localStorage.setItem(LS_DRIVE_FILE_ID, id);
+    driveNeedsAuth = false;
+    // Drive takes over: clear local-file modes.
+    fileHandle = null;
+    pendingHandle = null;
+    openedFileName = null;
+    await driveRead();
+    renderAll();
+    console.log("[TT] connectDrive: connected, file", id);
+  } catch (err) {
+    console.error("[TT] connectDrive error:", err);
+    if (err && (err.type === "popup_closed" || err.type === "popup_failed_to_open")) return;
+    alert("Could not connect Google Drive: " + (err.message || err.type || "unknown error"));
+  }
+}
+
+// On startup: if a Drive file was used before, try a silent token so the
+// connection is restored without a click. If silent auth needs UI, surface
+// a button instead (same pattern as the mobile reconnect flow).
+async function tryRestoreDrive() {
+  if (!DRIVE_ENABLED) return false;
+  const id = localStorage.getItem(LS_DRIVE_FILE_ID);
+  if (!id) return false;
+  try {
+    await ensureTokenClient();
+    console.log("[TT] tryRestoreDrive: attempting silent token");
+    await requestToken("");
+    driveFileId = id;
+    driveNeedsAuth = false;
+    await driveRead();
+    console.log("[TT] tryRestoreDrive: restored");
+    return true;
+  } catch (err) {
+    console.log("[TT] tryRestoreDrive: silent auth failed, will show button", err && (err.type || err.message));
+    driveNeedsAuth = true;
+    return false;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * 1c. Persist: debounced; routes to Drive, local file, or localStorage
+ * ------------------------------------------------------------------------ */
 function scheduleSave() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(persist, 300);
@@ -221,7 +378,9 @@ function scheduleSave() {
 
 async function persist() {
   try {
-    if (fileHandle) {
+    if (driveFileId) {
+      await driveWrite();
+    } else if (fileHandle) {
       await writeFile();
     } else {
       localStorage.setItem(LS_KEY, JSON.stringify(state));
@@ -423,30 +582,37 @@ function renderAll() {
 
 function renderFileStatus() {
   const status = $("fileStatus");
-  if (fileHandle) {
-    status.textContent = "Connected: " + fileHandle.name;
-    status.classList.add("connected");
-    $("reloadBtn").hidden = false;
-    $("reconnectBtn").hidden = true;
+  let text, connected = false, reload = false, reconnect = false, drive = false;
+
+  if (driveFileId) {
+    text = "Google Drive — synced (" + DRIVE_FILE_NAME + ")";
+    connected = true;
+    reload = true;
+  } else if (driveNeedsAuth) {
+    text = "Google Drive — tap to reconnect";
+    drive = true;
+  } else if (fileHandle) {
+    text = "Connected: " + fileHandle.name;
+    connected = true;
+    reload = true;
   } else if (pendingHandle) {
-    status.textContent = "Tap to reconnect: " + pendingHandle.name;
-    status.classList.remove("connected");
-    $("reloadBtn").hidden = true;
-    $("reconnectBtn").hidden = false;
+    text = "Tap to reconnect: " + pendingHandle.name;
+    reconnect = true;
   } else if (openedFileName) {
-    status.textContent = "Loaded: " + openedFileName + " — changes saved locally";
-    status.classList.remove("connected");
-    $("reloadBtn").hidden = true;
-    $("reconnectBtn").hidden = true;
+    text = "Loaded: " + openedFileName + " — changes saved locally";
   } else if (HAS_FS_ACCESS) {
-    status.textContent = "Not connected — using temporary storage";
-    status.classList.remove("connected");
-    $("reloadBtn").hidden = true;
-    $("reconnectBtn").hidden = true;
+    text = "Not connected — using temporary storage";
+    drive = DRIVE_ENABLED;
   } else {
-    status.textContent = "Browser storage (use Export to back up)";
-    status.classList.remove("connected");
+    text = "Browser storage (use Export to back up)";
+    drive = DRIVE_ENABLED;
   }
+
+  status.textContent = text;
+  status.classList.toggle("connected", connected);
+  $("reloadBtn").hidden = !reload;
+  $("reconnectBtn").hidden = !reconnect;
+  $("driveBtn").hidden = !drive;
 }
 
 function projectOptionsHTML(selectedId) {
@@ -640,8 +806,10 @@ function wireEvents() {
   $("openInput").addEventListener("change", handleOpenInput);
   $("connectBtn").addEventListener("click", connectFile);
   $("reconnectBtn").addEventListener("click", reconnectFile);
+  $("driveBtn").addEventListener("click", connectDrive);
   $("reloadBtn").addEventListener("click", async () => {
-    await readFile();
+    if (driveFileId) await driveRead();
+    else await readFile();
     renderAll();
   });
   $("exportBtn").addEventListener("click", exportJSON);
@@ -750,8 +918,32 @@ function saveEditDialog() {
 /* ---------------------------------------------------------------------------
  * 7. Init
  * ------------------------------------------------------------------------ */
+// Initialise the GIS token client. Safe to call repeatedly; no-op if ready.
+async function ensureTokenClient() {
+  if (tokenClient) return;
+  await whenGisReady();
+  tokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: GOOGLE_CLIENT_ID,
+    scope: DRIVE_SCOPE,
+    callback: (resp) => {
+      const w = tokenWaiters;
+      tokenWaiters = null;
+      if (!w) return;
+      if (resp && resp.error) return w.reject(resp);
+      driveToken = resp.access_token;
+      w.resolve(resp.access_token);
+    },
+    error_callback: (err) => {
+      const w = tokenWaiters;
+      tokenWaiters = null;
+      if (w) w.reject(err);
+    },
+  });
+}
+
 async function init() {
   wireEvents();
+  if (!DRIVE_ENABLED) $("driveBtn").hidden = true;
 
   // Show the right persistence controls.
   if (!HAS_FS_ACCESS) {
@@ -767,7 +959,16 @@ async function init() {
     await tryRestoreHandle();
   }
 
+  // Render immediately so a slow/blocked Google script never delays the UI.
   renderAll();
+
+  // Restore the Drive connection (if previously used) in the background.
+  if (DRIVE_ENABLED) {
+    ensureTokenClient()
+      .then(() => tryRestoreDrive())
+      .catch((err) => console.warn("[TT] Drive init failed:", err))
+      .finally(() => renderAll());
+  }
 }
 
 init();
