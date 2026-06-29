@@ -17,6 +17,7 @@ const IDB_HANDLE_KEY = "dataFile";
 let state = emptyState();
 let fileHandle = null;     // FileSystemFileHandle when connected (FS Access mode)
 let pendingHandle = null;  // handle retrieved from IDB that still needs permission (mobile reload)
+let openedFileName = null; // name of file opened via <input type="file"> (no write handle)
 let saveTimer = null;      // debounce handle for saving
 let tickTimer = null;      // setInterval for the live timer display
 
@@ -90,6 +91,7 @@ async function connectFile() {
     });
     console.log("[TT] connectFile: picked", handle.name, handle.kind);
     fileHandle = handle;
+    openedFileName = null;
     try {
       await idbSet(IDB_HANDLE_KEY, handle);
       console.log("[TT] connectFile: handle saved to IDB");
@@ -115,28 +117,34 @@ async function connectFile() {
 }
 
 // --- Open an existing data file ---
-async function openFile() {
-  try {
-    console.log("[TT] openFile: opening picker");
-    const [handle] = await window.showOpenFilePicker({
-      types: [{ description: "JSON", accept: { "application/json": [".json"] } }],
-      multiple: false,
-    });
-    console.log("[TT] openFile: picked", handle.name, handle.kind);
-    fileHandle = handle;
+// Uses <input type="file"> instead of showOpenFilePicker so it works on
+// remote/virtual filesystems (Google Drive FUSE mounts, etc.) where
+// showOpenFilePicker hangs silently in Chrome on Linux.
+function openFile() {
+  $("openInput").click();
+}
+
+function handleOpenInput(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  e.target.value = "";
+  console.log("[TT] handleOpenInput: reading", file.name, "size", file.size);
+  const reader = new FileReader();
+  reader.onload = () => {
     try {
-      await idbSet(IDB_HANDLE_KEY, handle);
-      console.log("[TT] openFile: handle saved to IDB");
-    } catch (idbErr) {
-      console.warn("[TT] openFile: IDB save failed (remote fs?):", idbErr);
+      const text = reader.result.trim();
+      console.log("[TT] handleOpenInput: text length", text.length);
+      state = text ? normalize(JSON.parse(text)) : emptyState();
+      openedFileName = file.name;
+      fileHandle = null; // no write handle — saves go to localStorage
+      console.log("[TT] handleOpenInput: loaded", state.projects.length, "projects,", state.entries.length, "entries");
+      persist();
+      renderAll();
+    } catch (err) {
+      alert("Could not load file: " + err.message);
     }
-    await readFile();
-    renderAll();
-  } catch (err) {
-    if (err && err.name === "AbortError") return; // user cancelled
-    console.error("[TT] openFile error:", err);
-    alert("Could not open the data file: " + err.message);
-  }
+  };
+  reader.readAsText(file);
 }
 
 // --- Reconnect to a previously stored handle on startup ---
@@ -176,6 +184,7 @@ async function reconnectFile() {
     }
     fileHandle = pendingHandle;
     pendingHandle = null;
+    openedFileName = null;
     await readFile();
     renderAll();
   } catch (err) {
@@ -424,6 +433,11 @@ function renderFileStatus() {
     status.classList.remove("connected");
     $("reloadBtn").hidden = true;
     $("reconnectBtn").hidden = false;
+  } else if (openedFileName) {
+    status.textContent = "Loaded: " + openedFileName + " — changes saved locally";
+    status.classList.remove("connected");
+    $("reloadBtn").hidden = true;
+    $("reconnectBtn").hidden = true;
   } else if (HAS_FS_ACCESS) {
     status.textContent = "Not connected — using temporary storage";
     status.classList.remove("connected");
@@ -623,6 +637,7 @@ function escapeAttr(s) {
 function wireEvents() {
   // File controls
   $("openBtn").addEventListener("click", openFile);
+  $("openInput").addEventListener("change", handleOpenInput);
   $("connectBtn").addEventListener("click", connectFile);
   $("reconnectBtn").addEventListener("click", reconnectFile);
   $("reloadBtn").addEventListener("click", async () => {
