@@ -20,6 +20,7 @@ const DRIVE_ENABLED = !!GOOGLE_CLIENT_ID;
 const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file";
 const DRIVE_FILE_NAME = "timetracker.json";
 const LS_DRIVE_FILE_ID = "timetracker.driveFileId";
+const LS_DRIVE_TOKEN = "timetracker.driveToken"; // cached {token, expiresAt} to survive reloads
 
 let state = emptyState();
 let fileHandle = null;     // FileSystemFileHandle when connected (FS Access mode)
@@ -230,6 +231,32 @@ async function writeFile() {
  * 1b. Google Drive storage (works on desktop + mobile, survives reload)
  * ------------------------------------------------------------------------ */
 
+// --- Cache the access token (with expiry) so a reload reuses it instead of
+// needing a fresh user-gesture sign-in. Tokens last ~1h; a 60s safety margin
+// avoids using one that's about to expire mid-request. ---
+function cacheToken(token, expiresInSec) {
+  driveToken = token;
+  try {
+    const expiresAt = Date.now() + (Number(expiresInSec) || 3600) * 1000;
+    localStorage.setItem(LS_DRIVE_TOKEN, JSON.stringify({ token, expiresAt }));
+  } catch { /* storage full/unavailable — token still usable this session */ }
+}
+
+function getCachedToken() {
+  try {
+    const raw = localStorage.getItem(LS_DRIVE_TOKEN);
+    if (!raw) return null;
+    const { token, expiresAt } = JSON.parse(raw);
+    if (token && expiresAt && expiresAt - 60000 > Date.now()) return token;
+  } catch { /* ignore malformed cache */ }
+  return null;
+}
+
+function clearCachedToken() {
+  driveToken = null;
+  try { localStorage.removeItem(LS_DRIVE_TOKEN); } catch { /* ignore */ }
+}
+
 // Resolve once the Google Identity Services script has loaded.
 function whenGisReady(timeoutMs = 8000) {
   return new Promise((resolve, reject) => {
@@ -262,10 +289,28 @@ async function driveFetch(url, opts = {}, retried = false) {
   });
   if (res.status === 401 && !retried) {
     console.log("[TT] driveFetch: 401, refreshing token");
+    clearCachedToken(); // stale; force a fresh one
     await requestToken("");
     return driveFetch(url, opts, true);
   }
   return res;
+}
+
+// Build a descriptive Error from a failed Drive response, including Google's
+// own message (e.g. "Google Drive API has not been used in project N …") and
+// the activation URL it returns, so the cause is actionable.
+async function driveError(res, label) {
+  let detail = "";
+  try {
+    const body = await res.json();
+    if (body && body.error) {
+      detail = body.error.message || "";
+      const help = body.error.errors && body.error.errors[0] && body.error.errors[0].extendedHelp;
+      if (help) detail += "\n" + help;
+    }
+  } catch { /* non-JSON body */ }
+  console.error("[TT]", label, res.status, detail);
+  return new Error(`${label} (${res.status})` + (detail ? ": " + detail : ""));
 }
 
 async function driveFindFile() {
@@ -273,7 +318,7 @@ async function driveFindFile() {
   const res = await driveFetch(
     `https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id,name)`
   );
-  if (!res.ok) throw new Error("Drive search failed: " + res.status);
+  if (!res.ok) throw await driveError(res, "Drive search failed");
   const data = await res.json();
   return data.files && data.files.length ? data.files[0].id : null;
 }
@@ -289,7 +334,7 @@ async function driveCreateFile() {
     "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id",
     { method: "POST", headers: { "Content-Type": `multipart/related; boundary=${boundary}` }, body }
   );
-  if (!res.ok) throw new Error("Drive create failed: " + res.status);
+  if (!res.ok) throw await driveError(res, "Drive create failed");
   const data = await res.json();
   return data.id;
 }
@@ -298,7 +343,7 @@ async function driveRead() {
   if (!driveFileId) return;
   console.log("[TT] driveRead:", driveFileId);
   const res = await driveFetch(`https://www.googleapis.com/drive/v3/files/${driveFileId}?alt=media`);
-  if (!res.ok) throw new Error("Drive read failed: " + res.status);
+  if (!res.ok) throw await driveError(res, "Drive read failed");
   const text = (await res.text()).trim();
   console.log("[TT] driveRead: text length", text.length);
   state = text ? normalize(JSON.parse(text)) : emptyState();
@@ -311,7 +356,7 @@ async function driveWrite() {
     `https://www.googleapis.com/upload/drive/v3/files/${driveFileId}?uploadType=media`,
     { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(state, null, 2) }
   );
-  if (!res.ok) throw new Error("Drive write failed: " + res.status);
+  if (!res.ok) throw await driveError(res, "Drive write failed");
 }
 
 // Connect to Drive from a user gesture (button click): authorize, then
@@ -345,13 +390,32 @@ async function connectDrive() {
   }
 }
 
-// On startup: if a Drive file was used before, try a silent token so the
-// connection is restored without a click. If silent auth needs UI, surface
-// a button instead (same pattern as the mobile reconnect flow).
+// On startup: if a Drive file was used before, reconnect without a click.
+// Prefer a still-valid cached token (survives reload); otherwise try a silent
+// token; if that needs UI, surface a reconnect button (mobile reconnect pattern).
 async function tryRestoreDrive() {
   if (!DRIVE_ENABLED) return false;
   const id = localStorage.getItem(LS_DRIVE_FILE_ID);
   if (!id) return false;
+
+  // 1. Reuse a cached, unexpired token — no Google round-trip, no gesture.
+  const cached = getCachedToken();
+  if (cached) {
+    driveToken = cached;
+    try {
+      driveFileId = id;
+      driveNeedsAuth = false;
+      await driveRead();
+      console.log("[TT] tryRestoreDrive: restored from cached token");
+      return true;
+    } catch (err) {
+      console.log("[TT] tryRestoreDrive: cached token rejected, falling back", err && err.message);
+      driveFileId = null;
+      clearCachedToken();
+    }
+  }
+
+  // 2. No usable cached token — attempt a silent re-auth (often needs a gesture).
   try {
     await ensureTokenClient();
     console.log("[TT] tryRestoreDrive: attempting silent token");
@@ -359,7 +423,7 @@ async function tryRestoreDrive() {
     driveFileId = id;
     driveNeedsAuth = false;
     await driveRead();
-    console.log("[TT] tryRestoreDrive: restored");
+    console.log("[TT] tryRestoreDrive: restored via silent token");
     return true;
   } catch (err) {
     console.log("[TT] tryRestoreDrive: silent auth failed, will show button", err && (err.type || err.message));
@@ -930,7 +994,7 @@ async function ensureTokenClient() {
       tokenWaiters = null;
       if (!w) return;
       if (resp && resp.error) return w.reject(resp);
-      driveToken = resp.access_token;
+      cacheToken(resp.access_token, resp.expires_in);
       w.resolve(resp.access_token);
     },
     error_callback: (err) => {
