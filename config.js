@@ -10,5 +10,5 @@
  * data file or browser storage).
  * ======================================================================== */
 window.TT_CONFIG = {
-  googleClientId: "", // e.g. "1234567890-abc123.apps.googleusercontent.com"
+  googleClientId: "149747328074-vt6n66k9kacqqo3cm7om1uh16j38du0t.apps.googleusercontent.com", // e.g. "1234567890-abc123.apps.googleusercontent.com"
 };
