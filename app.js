@@ -71,9 +71,12 @@ async function idbDelete(key) {
 // --- Permission helper for a stored handle ---
 async function ensurePermission(handle, mode = "readwrite") {
   const opts = { mode };
-  if ((await handle.queryPermission(opts)) === "granted") return true;
-  if ((await handle.requestPermission(opts)) === "granted") return true;
-  return false;
+  const current = await handle.queryPermission(opts);
+  console.log("[TT] ensurePermission queryPermission:", current, handle.name);
+  if (current === "granted") return true;
+  const requested = await handle.requestPermission(opts);
+  console.log("[TT] ensurePermission requestPermission:", requested, handle.name);
+  return requested === "granted";
 }
 
 // --- Connect (create or open) a data file ---
@@ -85,12 +88,19 @@ async function connectFile() {
       suggestedName: "timetracker.json",
       types: [{ description: "JSON", accept: { "application/json": [".json"] } }],
     });
+    console.log("[TT] connectFile: picked", handle.name, handle.kind);
     fileHandle = handle;
-    await idbSet(IDB_HANDLE_KEY, handle);
+    try {
+      await idbSet(IDB_HANDLE_KEY, handle);
+      console.log("[TT] connectFile: handle saved to IDB");
+    } catch (idbErr) {
+      console.warn("[TT] connectFile: IDB save failed (remote fs?):", idbErr);
+    }
 
     // If the file already has content, load it; otherwise write current state.
     const file = await handle.getFile();
     const text = (await file.text()).trim();
+    console.log("[TT] connectFile: file size", file.size, "text length", text.length);
     if (text) {
       state = normalize(JSON.parse(text));
     } else {
@@ -99,7 +109,7 @@ async function connectFile() {
     renderAll();
   } catch (err) {
     if (err && err.name === "AbortError") return; // user cancelled
-    console.error(err);
+    console.error("[TT] connectFile error:", err);
     alert("Could not connect the data file: " + err.message);
   }
 }
@@ -107,17 +117,24 @@ async function connectFile() {
 // --- Open an existing data file ---
 async function openFile() {
   try {
+    console.log("[TT] openFile: opening picker");
     const [handle] = await window.showOpenFilePicker({
       types: [{ description: "JSON", accept: { "application/json": [".json"] } }],
       multiple: false,
     });
+    console.log("[TT] openFile: picked", handle.name, handle.kind);
     fileHandle = handle;
-    await idbSet(IDB_HANDLE_KEY, handle);
+    try {
+      await idbSet(IDB_HANDLE_KEY, handle);
+      console.log("[TT] openFile: handle saved to IDB");
+    } catch (idbErr) {
+      console.warn("[TT] openFile: IDB save failed (remote fs?):", idbErr);
+    }
     await readFile();
     renderAll();
   } catch (err) {
     if (err && err.name === "AbortError") return; // user cancelled
-    console.error(err);
+    console.error("[TT] openFile error:", err);
     alert("Could not open the data file: " + err.message);
   }
 }
@@ -127,11 +144,13 @@ async function tryRestoreHandle() {
   if (!HAS_FS_ACCESS) return false;
   try {
     const handle = await idbGet(IDB_HANDLE_KEY);
+    console.log("[TT] tryRestoreHandle: IDB handle", handle ? handle.name : "none");
     if (!handle) return false;
     // queryPermission never needs a user gesture; requestPermission does.
     // On mobile, requestPermission during init will fail without a touch event,
     // so only proceed automatically when permission is already granted.
     const perm = await handle.queryPermission({ mode: "readwrite" });
+    console.log("[TT] tryRestoreHandle: queryPermission", perm);
     if (perm === "granted") {
       fileHandle = handle;
       await readFile();
@@ -141,7 +160,7 @@ async function tryRestoreHandle() {
     pendingHandle = handle;
     return false;
   } catch (err) {
-    console.warn("Could not restore previous file:", err);
+    console.warn("[TT] tryRestoreHandle error:", err);
     return false;
   }
 }
@@ -150,27 +169,36 @@ async function tryRestoreHandle() {
 async function reconnectFile() {
   if (!pendingHandle) return;
   try {
-    if (!(await ensurePermission(pendingHandle))) return;
+    console.log("[TT] reconnectFile: requesting permission for", pendingHandle.name);
+    if (!(await ensurePermission(pendingHandle))) {
+      console.warn("[TT] reconnectFile: permission denied");
+      return;
+    }
     fileHandle = pendingHandle;
     pendingHandle = null;
     await readFile();
     renderAll();
   } catch (err) {
-    console.warn("Could not reconnect to file:", err);
+    console.warn("[TT] reconnectFile error:", err);
   }
 }
 
 // --- Read current state from the connected file ---
 async function readFile() {
-  if (!fileHandle) return;
+  if (!fileHandle) { console.warn("[TT] readFile: no fileHandle"); return; }
+  console.log("[TT] readFile: reading", fileHandle.name);
   const file = await fileHandle.getFile();
+  console.log("[TT] readFile: file size", file.size, "lastModified", new Date(file.lastModified).toISOString());
   const text = (await file.text()).trim();
+  console.log("[TT] readFile: text length", text.length, text ? "parsing JSON" : "empty → emptyState");
   state = text ? normalize(JSON.parse(text)) : emptyState();
+  console.log("[TT] readFile: loaded", state.projects.length, "projects,", state.entries.length, "entries");
 }
 
 // --- Write current state to the connected file (FS Access mode) ---
 async function writeFile() {
   if (!fileHandle) return;
+  console.log("[TT] writeFile:", fileHandle.name);
   const writable = await fileHandle.createWritable();
   await writable.write(JSON.stringify(state, null, 2));
   await writable.close();
@@ -190,7 +218,7 @@ async function persist() {
       localStorage.setItem(LS_KEY, JSON.stringify(state));
     }
   } catch (err) {
-    console.error("Save failed:", err);
+    console.error("[TT] persist failed:", err);
   }
 }
 
